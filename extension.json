@@ -1,9 +1,9 @@
 {
-  "name": "SPI Flash",
-  "apiVersion": "1.0.0",
-  "author": "Scott Shawcroft for Adafruit",
+  "name": "SPI for WP128F-1146765",
+  "apiVersion": "1.1.0",
+  "author": "ADG(coder panda)",
   "version": "0.8.0",
-  "description": "Annotate common SPI flash commands",
+  "description": "takenand updated from Scott Shawcroft for Adafruit",
   "extensions": {
     "SPI Flash": {
       "type": "HighLevelAnalyzer",

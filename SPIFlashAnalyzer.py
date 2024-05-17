@@ -1,30 +1,39 @@
-# High Level Analyzer
-# For more information and documentation, please go to https://support.saleae.com/extensions/high-level-analyzer-extensions
-
 from saleae.analyzers import HighLevelAnalyzer, AnalyzerFrame, StringSetting, NumberSetting, ChoicesSetting
 
 import struct
 
-# value is dummy clocks
+# Value is dummy clocks
 CONTINUE_COMMANDS = {
     0x6b: 8,
     0xe7: 2,
     0xeb: 4,
 }
 
-DATA_COMMANDS = {0x03: "Read",
-                 0x0b: "Fast Read",
-                 0x5b: "Read SFDP",
-                 0x6b: "Quad-Output Fast Read",
-                 0x9e: "Read JEDEC ID",
-                 0x9f: "Read JEDEC ID",
-                 0xe7: "Quad Word Read",
-                 0xeb: "Quad Read",
-                 0x02: "Page Program",
-                 0x32: "Quad Page Program"}
+DATA_COMMANDS = {
+    0x03: "Read",
+    0x0b: "Fast Read",
+    0x5b: "Read SFDP",
+    0x6b: "Quad-Output Fast Read",
+    0x9e: "Read JEDEC ID",
+    0x9f: "Read JEDEC ID",
+    0xe7: "Quad Word Read",
+    0xeb: "Quad Read",
+    0x02: "Page Program",
+    0x32: "Quad Page Program",
+    # IS25LP128F Specific Commands
+    0x12: "4-byte PAGE PROGRAM",
+    0x13: "4-byte READ",
+    0x34: "4-byte QUAD INPUT PAGE PROGRAM",
+    0x5C: "4-byte BLOCK ERASE 32KB",
+    0xD8: "4-byte BLOCK ERASE 64KB",
+    0x20: "4-byte SECTOR ERASE 4KB",
+    0xE1: "4-byte WRITE DYB REGISTER",
+    0xE3: "4-byte PROGRAM PPB"
+}
 
 EN4B = 0xB7
 EX4B = 0xE9
+
 CONTROL_COMMANDS = {
     0x01: "Write Status Register 1",
     0x06: "Write Enable",
@@ -35,8 +44,13 @@ CONTROL_COMMANDS = {
     0x75: "Program Suspend",
     0xAB: "Release Power-down / Device ID",
     EN4B: "Enable 4 Byte Address",
-    EX4B: "Exit 4 Byte Address"
+    EX4B: "Exit 4 Byte Address",
+    # IS25LP128F Specific Commands
+    0x85: "Read Extended Read Parameters",
+    0xC0: "Set Read Parameters",
+    0x61: "Read Read Parameters"
 }
+
 
 class FakeFrame:
     def __init__(self, t, time=None):
@@ -45,15 +59,12 @@ class FakeFrame:
         self.end_time = time
         self.data = {}
 
-# High level analyzers must subclass the HighLevelAnalyzer class.
 class SPIFlash(HighLevelAnalyzer):
-    # List of settings that a user can set for this High Level Analyzer.
     address_bytes = NumberSetting(min_value=1, max_value=4)
     min_address = NumberSetting(min_value=0)
     max_address = NumberSetting(min_value=0)
     decode_level = ChoicesSetting(choices=('Everything', 'Only Data', 'Only Errors', 'Only Control'))
 
-    # An optional list of types this analyzer produces, providing a way to customize the way frames are displayed in Logic 2.
     result_types = {
         'error': {
             'format': 'Error!'
@@ -67,14 +78,9 @@ class SPIFlash(HighLevelAnalyzer):
     }
 
     def __init__(self):
-        '''
-        Initialize HLA.
-
-        Settings can be accessed using the same name used above.
-        '''
         self._start_time = None
         self._address_bytes = 3
-        self._address_format = "{:0" + str(2*int(self._address_bytes)) + "x}"
+        self._address_format = "{:0" + str(2 * int(self._address_bytes)) + "x}"
         self._min_address = int(self.min_address)
         self._max_address = None
         if self.max_address:
@@ -84,8 +90,6 @@ class SPIFlash(HighLevelAnalyzer):
         self._mosi_data = None
         self._empty_result_count = 0
 
-        # These are for quad decoding. The input will be a SimpleParallel analyzer
-        # with the correct clock edge. CS is inferred from a gap in time.
         self._last_cs = 1
         self._last_time = None
         self._transaction = 0
@@ -99,15 +103,7 @@ class SPIFlash(HighLevelAnalyzer):
 
         self._fastest_cs = 2000000
 
-
     def decode(self, frame: AnalyzerFrame):
-        '''
-        Process a frame from the input analyzer, and optionally return a single `AnalyzerFrame` or a list of `AnalyzerFrame`s.
-
-        The type and data values in `frame` will depend on the input analyzer.
-        '''
-
-        # Support getting data from a Simple Parallel and converting it.
         frames = []
         if frame.type == "data":
             data = frame.data["data"]
@@ -132,7 +128,6 @@ class SPIFlash(HighLevelAnalyzer):
                     self._quad_start = None
                     self._dummy = 0
 
-                    # Zero the data buffers to prevent issues with odd lengths of transactions if QSPI mode isn't detected properly.
                     self._mosi_out = 0
                     self._miso_in = 0
                 else:
@@ -144,7 +139,6 @@ class SPIFlash(HighLevelAnalyzer):
 
             self._last_time = frame.start_time
 
-            # TODO: We could output clock counts when cs is high.
             if cs == 1:
                 return None
 
@@ -167,7 +161,6 @@ class SPIFlash(HighLevelAnalyzer):
             else:
                 self._quad_data = (self._quad_data << 4 | data & 0xf)
                 if self._clock_count % 2 == 1:
-
                     f = FakeFrame("result")
                     if not 15 < self._clock_count <= 15 + self._dummy:
                         f.data["mosi"] = [self._quad_data]
@@ -177,12 +170,6 @@ class SPIFlash(HighLevelAnalyzer):
                         f.data["miso"] = [self._quad_data]
                     frames.append(f)
                     if self._command in CONTINUE_COMMANDS and self._clock_count == 15:
-                        # At least some SPI flashes use 'nibbles are complements' to enter
-                        # continous read mode (or ST calls 'send instruction only'). So this
-                        # should check for e.g., 0xa5. Unclear if some flashes don't do this
-                        # and just use any pattern in high nibble, so check for 0xA in high
-                        # nibble which seems to work in practice. If you aren't seeing
-                        # continous reads working look here first.
                         self._continuous = (self._quad_data & 0xf0) == 0xa0
                     self._quad_data = 0
 
@@ -220,7 +207,7 @@ class SPIFlash(HighLevelAnalyzer):
                         frame_address = 0
                         for i in range(int(self._address_bytes)):
                             frame_address <<= 8
-                            frame_address += self._mosi_data[1+i]
+                            frame_address += self._mosi_data[1 + i]
                         if self.min_address > 0 and frame_address < self._min_address:
                             frame_type = None
                         elif self.max_address and frame_address > self.max_address:
@@ -228,10 +215,8 @@ class SPIFlash(HighLevelAnalyzer):
                         else:
                             frame_data["address"] = self._address_format.format(frame_address)
                             non_data_bytes = 2
-                            # Fast read has a dummy byte
                             if frame_data["command"] == DATA_COMMANDS[0x0b]:
                                 non_data_bytes += 1
-                            # QSPI read has dummy (4 cycles = 2bytes)
                             if frame_data["command"] == DATA_COMMANDS[0xeb]:
                                 non_data_bytes += 2
                             num_data_bytes = len(self._mosi_data) - int(self.address_bytes) - non_data_bytes
@@ -241,14 +226,13 @@ class SPIFlash(HighLevelAnalyzer):
                     if command in CONTROL_COMMANDS:
                         frame_data["command"] = CONTROL_COMMANDS[command]
                     else:
-                        # Unrecognized commands are printed in hexadecimal
-                        frame_data["command"] = ''.join([ '0x', hex(command).upper()[2:] ])
+                        frame_data["command"] = ''.join(['0x', hex(command).upper()[2:]])
                     if command == EN4B:
                         self._address_bytes = 4
-                        self._address_format = "{:0" + str(2*int(self._address_bytes)) + "x}"
+                        self._address_format = "{:0" + str(2 * int(self._address_bytes)) + "x}"
                     elif command == EX4B:
                         self._address_bytes = 3
-                        self._address_format = "{:0" + str(2*int(self._address_bytes)) + "x}"
+                        self._address_format = "{:0" + str(2 * int(self._address_bytes)) + "x}"
                     frame_type = "control_command"
                 our_frame = None
                 if frame_type:
